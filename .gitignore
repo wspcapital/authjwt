@@ -1,1 +1,4 @@
-.idea
+.idea/
+example/
+conf/conf
+db/dbconf.yml

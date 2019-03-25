@@ -13,7 +13,18 @@ import (
 	"github.com/dgryski/dgoogauth"
 	"github.com/gorilla/context"
 	"github.com/gorilla/mux"
+	"github.com/jinzhu/gorm"
+	_ "github.com/jinzhu/gorm/dialects/postgres"
+	"os"
+	"authjwt/model"
+	"crypto/sha256"
+	"encoding/hex"
+	"hash"
+	"crypto/hmac"
+	"time"
 )
+
+var DbConnect *gorm.DB
 
 var jwtSecret string
 
@@ -137,115 +148,134 @@ func GenerateSecretEndpoint(w http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(w).Encode(secret)
 }
 
+func confdb() (string) {
+	file, err := os.Open("conf/conf")
+	if err != nil {
+		panic(err)
+	}
+	type dbConf struct {
+		DbHost string
+		DbPort string
+		DbName string
+		DbUser string
+		DbPsw string
+		BotKey string
+		BotSesDuration int64
+	}
+	dbconf := dbConf{}
+	decoder := json.NewDecoder(file)
+	err = decoder.Decode(&dbconf)
+	if err != nil {
+		panic(err)
+	}
+
+	return "host=" + dbconf.DbHost + " port=" + dbconf.DbPort + " user=" + dbconf.DbUser + " dbname=" + dbconf.DbName + " password=" + dbconf.DbPsw
+}
+
+type newUser struct {
+	FirstName string `json:"firstname"`
+	LastName string `json:"lastname"`
+	Email string `json:"email"`
+	Password string `json:"password"`
+	ConfPassword string `json:"confpassword"`
+}
+
+func SignUpEndpoint(w http.ResponseWriter, req *http.Request) {
+	var u newUser
+	_ = json.NewDecoder(req.Body).Decode(&u)
+
+	salt := GetRandomString(15)
+	encodedPwd := salt + "$" + EncodePassword(u.Password, salt)
+
+	User := model.User{
+		FirstName:	u.FirstName,
+		LastName:	u.LastName,
+		Alias:		u.FirstName+"_"+u.LastName,
+		Passw:		encodedPwd,
+		Active:		true,
+		Email:      u.Email,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+
+	DbConnect.Create(&User)
+
+	if DbConnect.Error != nil {
+		fmt.Println(DbConnect.Error)
+		json.NewEncoder(w).Encode(nil)
+	}
+	json.NewEncoder(w).Encode(User.ID)
+}
+
 func main() {
+	db, err := gorm.Open("postgres", confdb())
+	DbConnect = db
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+
 	router := mux.NewRouter()
 	fmt.Println("Starting the application...")
 	jwtSecret = "JC7qMMZh4G"
+	router.HandleFunc("/signup", SignUpEndpoint).Methods("POST")
 	router.HandleFunc("/authenticate", CreateTokenEndpoint).Methods("POST")
 	router.HandleFunc("/verify-otp", VerifyOtpEndpoint).Methods("POST")
 	router.HandleFunc("/protected", ValidateMiddleware(ProtectedEndpoint)).Methods("GET")
 	router.HandleFunc("/generate-secret", GenerateSecretEndpoint).Methods("GET")
 	log.Fatal(http.ListenAndServe(":8080", router))
 }
-/*import (
-	"encoding/json"
-	"fmt"
-	"log"
-	"net/http"
-	"strings"
 
-	"github.com/dgrijalva/jwt-go"
-	"github.com/gorilla/context"
-	"github.com/gorilla/mux"
-	"github.com/mitchellh/mapstructure"
-)
-
-type User struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-type JwtToken struct {
-	Token string `json:"token"`
-}
-
-type Exception struct {
-	Message string `json:"message"`
-}
-
-func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
-	var user User
-	_ = json.NewDecoder(req.Body).Decode(&user)
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"username": user.Username,
-		"password": user.Password,
-	})
-	tokenString, error := token.SignedString([]byte("secret"))
-	if error != nil {
-		fmt.Println(error)
+// Random generate string
+func GetRandomString(n int) string {
+	const alphanum = "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	var bytes = make([]byte, n)
+	rand.Read(bytes)
+	for i, b := range bytes {
+		bytes[i] = alphanum[b%byte(len(alphanum))]
 	}
-	json.NewEncoder(w).Encode(JwtToken{Token: tokenString})
+	return string(bytes)
 }
 
-func ProtectedEndpoint(w http.ResponseWriter, req *http.Request) {
-	params := req.URL.Query()
-	token, _ := jwt.Parse(params["token"][0], func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("There was an error")
-		}
-		return []byte("secret"), nil
-	})
-	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-		var user User
-		mapstructure.Decode(claims, &user)
-		json.NewEncoder(w).Encode(user)
-	} else {
-		json.NewEncoder(w).Encode(Exception{Message: "Invalid authorization token"})
-	}
+func EncodePassword(rawPwd string, salt string) string {
+	pwd := PBKDF2([]byte(rawPwd), []byte(salt), 10000, 50, sha256.New)
+	return hex.EncodeToString(pwd)
 }
 
-func ValidateMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		authorizationHeader := req.Header.Get("authorization")
-		if authorizationHeader != "" {
-			bearerToken := strings.Split(authorizationHeader, " ")
-			if len(bearerToken) == 2 {
-				token, error := jwt.Parse(bearerToken[1], func(token *jwt.Token) (interface{}, error) {
-					if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-						return nil, fmt.Errorf("There was an error")
-					}
-					return []byte("secret"), nil
-				})
-				if error != nil {
-					json.NewEncoder(w).Encode(Exception{Message: error.Error()})
-					return
-				}
-				if token.Valid {
-					context.Set(req, "decoded", token.Claims)
-					next(w, req)
-				} else {
-					json.NewEncoder(w).Encode(Exception{Message: "Invalid authorization token"})
-				}
+// http://code.google.com/p/go/source/browse/pbkdf2/pbkdf2.go?repo=crypto
+func PBKDF2(password, salt []byte, iter, keyLen int, h func() hash.Hash) []byte {
+	prf := hmac.New(h, password)
+	hashLen := prf.Size()
+	numBlocks := (keyLen + hashLen - 1) / hashLen
+
+	var buf [4]byte
+	dk := make([]byte, 0, numBlocks*hashLen)
+	U := make([]byte, hashLen)
+	for block := 1; block <= numBlocks; block++ {
+		// N.B.: || means concatenation, ^ means XOR
+		// for each block T_i = U_1 ^ U_2 ^ ... ^ U_iter
+		// U_1 = PRF(password, salt || uint(i))
+		prf.Reset()
+		prf.Write(salt)
+		buf[0] = byte(block >> 24)
+		buf[1] = byte(block >> 16)
+		buf[2] = byte(block >> 8)
+		buf[3] = byte(block)
+		prf.Write(buf[:4])
+		dk = prf.Sum(dk)
+		T := dk[len(dk)-hashLen:]
+		copy(U, T)
+
+		// U_n = PRF(password, U_(n-1))
+		for n := 2; n <= iter; n++ {
+			prf.Reset()
+			prf.Write(U)
+			U = U[:0]
+			U = prf.Sum(U)
+			for x := range U {
+				T[x] ^= U[x]
 			}
-		} else {
-			json.NewEncoder(w).Encode(Exception{Message: "An authorization header is required"})
 		}
-	})
+	}
+	return dk[:keyLen]
 }
-
-func TestEndpoint(w http.ResponseWriter, req *http.Request) {
-	decoded := context.Get(req, "decoded")
-	var user User
-	mapstructure.Decode(decoded.(jwt.MapClaims), &user)
-	json.NewEncoder(w).Encode(user)
-}
-
-func main() {
-	router := mux.NewRouter()
-	fmt.Println("Starting the application...")
-	router.HandleFunc("/authenticate", CreateTokenEndpoint).Methods("POST")
-	router.HandleFunc("/protected", ProtectedEndpoint).Methods("GET")
-	router.HandleFunc("/test", ValidateMiddleware(TestEndpoint)).Methods("GET")
-	log.Fatal(http.ListenAndServe(":8080", router))
-}
-*/
