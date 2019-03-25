@@ -42,6 +42,7 @@ func SignJwt(claims jwt.MapClaims, secret string) (string, error) {
 }
 
 func VerifyJwt(token string, secret string) (map[string]interface{}, error) {
+
 	jwToken, err := jwt.Parse(token, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("There was an error")
@@ -91,17 +92,48 @@ func ValidateMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	})
 }
 
+type signinUser struct {
+	Email string `json:"email"`
+	Password string `json:"password"`
+}
+
 func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
-	mockUser := make(map[string]interface{})
-	mockUser["username"] = "nraboy"
-	mockUser["password"] = "password"
-	mockUser["authorized"] = false
-	tokenString, err := SignJwt(mockUser, jwtSecret)
+	var u signinUser
+	_ = json.NewDecoder(req.Body).Decode(&u)
+	var user model.User
+	if err := DbConnect.Table("users").
+		Select("users.email, users.passw, users.salt").
+		Where("users.email =  ?", u.Email).Find(&user).Error; err != nil {
+		json.NewEncoder(w).Encode("Indicated Email is absent")
+		return
+	}
+
+	if VerifyPassword(u.Password, user.Passw) == false {
+		json.NewEncoder(w).Encode("Wrong password")
+		return
+	}
+
+	authUser := make(map[string]interface{})
+	authUser["username"] = u.Email
+	authUser["password"] = u.Password
+	authUser["authorized"] = false
+
+	tokenString, err := SignJwt(authUser, jwtSecret)
 	if err != nil {
 		json.NewEncoder(w).Encode(err)
 		return
 	}
+
+	DbConnect.Model(&user).Update("session_key", GetRandomString(24))
 	json.NewEncoder(w).Encode(JwtToken{Token: tokenString})
+}
+
+func VerifyPassword(rawPwd, encodedPwd string) bool {
+	var salt, encoded string
+	salt = encodedPwd[:15]
+	encoded = encodedPwd[16:]
+
+	return EncodePassword(rawPwd, salt) == encoded
 }
 
 func ProtectedEndpoint(w http.ResponseWriter, req *http.Request) {
@@ -110,9 +142,10 @@ func ProtectedEndpoint(w http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(w).Encode(decoded)
 }
 
-func VerifyOtpEndpoint(w http.ResponseWriter, req *http.Request) {
+func VerifyOtpGetEndpoint(w http.ResponseWriter, req *http.Request) {
 	secret := "7DRUFISBBUCNXPM6"
 	bearerToken, err := GetBearerToken(req.Header.Get("authorization"))
+
 	if err != nil {
 		json.NewEncoder(w).Encode(err)
 		return
@@ -122,6 +155,40 @@ func VerifyOtpEndpoint(w http.ResponseWriter, req *http.Request) {
 		json.NewEncoder(w).Encode(err)
 		return
 	}
+	fmt.Println(decodedToken)
+	otpc := &dgoogauth.OTPConfig{
+		Secret:      secret,
+		WindowSize:  3,
+		HotpCounter: 0,
+	}
+	var otpToken OtpToken
+	_ = json.NewDecoder(req.Body).Decode(&otpToken)
+	fmt.Println(otpToken.Token)
+	decodedToken["authorized"], _ = otpc.Authenticate(otpToken.Token)
+
+	if decodedToken["authorized"] != false {
+		json.NewEncoder(w).Encode("Invalid one-time password!")
+		return
+	}
+	decodedToken["authorized"] = true
+	jwToken, _ := SignJwt(decodedToken, jwtSecret)
+	json.NewEncoder(w).Encode(jwToken)
+}
+
+func VerifyOtpPostEndpoint(w http.ResponseWriter, req *http.Request) {
+	secret := "7DRUFISBBUCNXPM6"
+	bearerToken, err := GetBearerToken(req.Header.Get("authorization"))
+
+	if err != nil {
+		json.NewEncoder(w).Encode(err)
+		return
+	}
+	decodedToken, err := VerifyJwt(bearerToken, jwtSecret)
+	if err != nil {
+		json.NewEncoder(w).Encode(err)
+		return
+	}
+	fmt.Println(decodedToken)
 	otpc := &dgoogauth.OTPConfig{
 		Secret:      secret,
 		WindowSize:  3,
@@ -194,6 +261,7 @@ func SignUpEndpoint(w http.ResponseWriter, req *http.Request) {
 		Passw:		encodedPwd,
 		Active:		true,
 		Email:      u.Email,
+		Salt:		salt,
 		CreatedAt:  time.Now(),
 		UpdatedAt:  time.Now(),
 	}
@@ -220,7 +288,8 @@ func main() {
 	jwtSecret = "JC7qMMZh4G"
 	router.HandleFunc("/signup", SignUpEndpoint).Methods("POST")
 	router.HandleFunc("/authenticate", CreateTokenEndpoint).Methods("POST")
-	router.HandleFunc("/verify-otp", VerifyOtpEndpoint).Methods("POST")
+	router.HandleFunc("/verify-otp", VerifyOtpPostEndpoint).Methods("POST")
+	router.HandleFunc("/verify-otp", VerifyOtpGetEndpoint).Methods("GET")
 	router.HandleFunc("/protected", ValidateMiddleware(ProtectedEndpoint)).Methods("GET")
 	router.HandleFunc("/generate-secret", GenerateSecretEndpoint).Methods("GET")
 	log.Fatal(http.ListenAndServe(":8080", router))
@@ -242,7 +311,6 @@ func EncodePassword(rawPwd string, salt string) string {
 	return hex.EncodeToString(pwd)
 }
 
-// http://code.google.com/p/go/source/browse/pbkdf2/pbkdf2.go?repo=crypto
 func PBKDF2(password, salt []byte, iter, keyLen int, h func() hash.Hash) []byte {
 	prf := hmac.New(h, password)
 	hashLen := prf.Size()
@@ -252,9 +320,6 @@ func PBKDF2(password, salt []byte, iter, keyLen int, h func() hash.Hash) []byte 
 	dk := make([]byte, 0, numBlocks*hashLen)
 	U := make([]byte, hashLen)
 	for block := 1; block <= numBlocks; block++ {
-		// N.B.: || means concatenation, ^ means XOR
-		// for each block T_i = U_1 ^ U_2 ^ ... ^ U_iter
-		// U_1 = PRF(password, salt || uint(i))
 		prf.Reset()
 		prf.Write(salt)
 		buf[0] = byte(block >> 24)
