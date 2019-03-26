@@ -67,3 +67,11 @@ func PBKDF2(password, salt []byte, iter, keyLen int, h func() hash.Hash) []byte 
 	}
 	return dk[:keyLen]
 }
+
+func VerifyPassword(rawPwd, encodedPwd string) bool {
+	var salt, encoded string
+	salt = encodedPwd[:15]
+	encoded = encodedPwd[16:]
+
+	return EncodePassword(rawPwd, salt) == encoded
+}

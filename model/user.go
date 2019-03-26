@@ -16,6 +16,8 @@ type User struct {
 	Active      bool
 	Role        int
 	Salt        string
+	TwoFactorEmail bool
+	TwoFactorTelegram bool
 	SessionKey string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time

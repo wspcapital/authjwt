@@ -2,3 +2,4 @@
 example/
 conf/conf
 db/dbconf.yml
+.env

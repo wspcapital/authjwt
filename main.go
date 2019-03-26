@@ -14,9 +14,9 @@ import (
 	_ "github.com/jinzhu/gorm/dialects/postgres"
 	"authjwt/model"
 	"time"
-	"regexp"
-	"net/smtp"
 	"authjwt/service"
+	"os"
+	"github.com/joho/godotenv"
 )
 
 var DbConnect *gorm.DB
@@ -93,13 +93,13 @@ func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
 	_ = json.NewDecoder(req.Body).Decode(&u)
 	var user model.User
 	if err := DbConnect.Table("users").
-		Select("users.email, users.passw, users.salt, users.chat_id").
+		Select("users.email, users.passw, users.salt, users.chat_id, users.two_factor_email, users.two_factor_telegram").
 		Where("users.email =  ?", u.Email).Find(&user).Error; err != nil {
 		json.NewEncoder(w).Encode("Indicated Email is absent")
 		return
 	}
 
-	if VerifyPassword(u.Password, user.Passw) == false {
+	if service.VerifyPassword(u.Password, user.Passw) == false {
 		json.NewEncoder(w).Encode("Wrong password")
 		return
 	}
@@ -116,23 +116,18 @@ func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
 	}
 	otp := service.GetRandomString(24)
 	DbConnect.Model(&user).Update("session_key", otp)
-	if !SendOtpByEmail(u.Email, otp) {
-		json.NewEncoder(w).Encode("OTP is not sent by email")
-		return
+
+	var sentOtp bool
+	if user.TwoFactorEmail {
+		sentOtp = service.SendOtpByEmail(u.Email, otp)
+	} else if user.TwoFactorTelegram {
+		sentOtp = service.SendOtpByTelegram(user.ChatID, tokenString)
 	}
-	if !SendOtpByTelegram(user.ChatID, tokenString){
-		json.NewEncoder(w).Encode("OTP is not sent by telegram")
+	if !sentOtp {
+		json.NewEncoder(w).Encode("OTP is not sent")
 		return
 	}
 	json.NewEncoder(w).Encode(JwtToken{Token: tokenString})
-}
-
-func VerifyPassword(rawPwd, encodedPwd string) bool {
-	var salt, encoded string
-	salt = encodedPwd[:15]
-	encoded = encodedPwd[16:]
-
-	return service.EncodePassword(rawPwd, salt) == encoded
 }
 
 func ProtectedEndpoint(w http.ResponseWriter, req *http.Request) {
@@ -199,13 +194,23 @@ func SignUpEndpoint(w http.ResponseWriter, req *http.Request) {
 	var u newUser
 	_ = json.NewDecoder(req.Body).Decode(&u)
 
-	salt := service.GetRandomString(15)
-	encodedPwd := salt + "$" + service.EncodePassword(u.Password, salt)
-
-	if !ValidateEmail(u.Email) {
+	if !service.ValidateEmail(u.Email) {
 		json.NewEncoder(w).Encode("Incorrect Email address")
 		return
 	}
+
+	var user model.User
+	err := DbConnect.Table("users").
+		Select("users.email, users.passw, users.salt, users.chat_id").
+		Where("users.email =  ?", u.Email).First(&user)
+
+	if !err.RecordNotFound() {
+		json.NewEncoder(w).Encode("Email " + user.Email + " is used")
+		return
+	}
+
+	salt := service.GetRandomString(15)
+	encodedPwd := salt + "$" + service.EncodePassword(u.Password, salt)
 
 	User := model.User{
 		FirstName:	u.FirstName,
@@ -230,8 +235,9 @@ func SignUpEndpoint(w http.ResponseWriter, req *http.Request) {
 }
 
 func main() {
+	err := godotenv.Load()
 	db, err := gorm.Open("postgres",
-		"host=127.0.0.1 port=54320 user=homestead dbname=stock password=secret")
+		"host=" + os.Getenv("DB_HOST") + " port=" + os.Getenv("DB_PORT") + " user=" + os.Getenv("DB_USER") + " dbname=" + os.Getenv("DB_NAME") + " password=" + os.Getenv("DB_PSW"))
 	DbConnect = db
 	if err != nil {
 		panic(err)
@@ -240,62 +246,11 @@ func main() {
 
 	router := mux.NewRouter()
 	fmt.Println("Starting the application...")
-	jwtSecret = "JC7qMMZh4G"
+	jwtSecret = os.Getenv("APP_JWT_SECRET")
 	router.HandleFunc("/signup", SignUpEndpoint).Methods("POST")
 	router.HandleFunc("/authenticate", CreateTokenEndpoint).Methods("POST")
 	router.HandleFunc("/verify-otp", VerifyOtpGetEndpoint).Methods("GET")
 	router.HandleFunc("/protected", ValidateMiddleware(ProtectedEndpoint)).Methods("GET")
 	router.HandleFunc("/generate-secret", service.GenerateSecretEndpoint).Methods("GET")
 	log.Fatal(http.ListenAndServe(":8080", router))
-}
-
-func ValidateEmail(email string) bool {
-	Re := regexp.MustCompile(`^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,4}$`)
-	return Re.MatchString(email)
-}
-
-func SendOtpByEmail(recipient string, otp string)  bool{
-
-	auth := smtp.PlainAuth(
-		"",
-		"",//email
-		"",//email pass
-		"smtp.gmail.com",
-	)
-	msg := []byte("To: " +
-		recipient + "\r\n" +
-		"Subject: 2FA\r\n" +
-		"\r\n" +
-		otp + "\r\n")
-	err := smtp.SendMail(
-		"smtp.gmail.com:587",
-		auth,
-		"wspdev@gmail.com",
-		[]string{recipient},
-		msg,
-	)
-	if err != nil {
-		fmt.Println(err)
-		return false
-	}
-
-	return true
-}
-
-func SendOtpByTelegram(chat_id int64, otp string)  bool{
-
-	body := strings.NewReader("chat_id=" + string(chat_id) + "&text=" + otp)
-	req, err := http.NewRequest("POST", "https://api.telegram.org/767108852:AAEs5E84kXHeV9Lqttm8sf5_ADhaitxEzU4/sendMessage", body)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-
-	return true
 }
