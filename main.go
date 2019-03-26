@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/base32"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,18 +8,15 @@ import (
 	"strings"
 
 	"github.com/dgrijalva/jwt-go"
-	"github.com/dgryski/dgoogauth"
 	"github.com/gorilla/context"
 	"github.com/gorilla/mux"
 	"github.com/jinzhu/gorm"
 	_ "github.com/jinzhu/gorm/dialects/postgres"
-	"os"
 	"authjwt/model"
-	"crypto/sha256"
-	"encoding/hex"
-	"hash"
-	"crypto/hmac"
 	"time"
+	"regexp"
+	"net/smtp"
+	"authjwt/sevice"
 )
 
 var DbConnect *gorm.DB
@@ -30,10 +25,6 @@ var jwtSecret string
 
 type JwtToken struct {
 	Token string `json:"token"`
-}
-
-type OtpToken struct {
-	Token string `json:"otp"`
 }
 
 func SignJwt(claims jwt.MapClaims, secret string) (string, error) {
@@ -78,7 +69,7 @@ func ValidateMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		decodedToken, err := VerifyJwt(bearerToken, jwtSecret)
-		//fmt.Println(decodedToken)
+		fmt.Println(decodedToken)
 		if err != nil {
 			json.NewEncoder(w).Encode(err)
 			return
@@ -102,7 +93,7 @@ func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
 	_ = json.NewDecoder(req.Body).Decode(&u)
 	var user model.User
 	if err := DbConnect.Table("users").
-		Select("users.email, users.passw, users.salt").
+		Select("users.email, users.passw, users.salt, users.chat_id").
 		Where("users.email =  ?", u.Email).Find(&user).Error; err != nil {
 		json.NewEncoder(w).Encode("Indicated Email is absent")
 		return
@@ -123,8 +114,16 @@ func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
 		json.NewEncoder(w).Encode(err)
 		return
 	}
-
-	DbConnect.Model(&user).Update("session_key", GetRandomString(24))
+	otp := sevice.GetRandomString(24)
+	DbConnect.Model(&user).Update("session_key", otp)
+	if !SendOtpByEmail(u.Email, otp) {
+		json.NewEncoder(w).Encode("OTP is not sent by email")
+		return
+	}
+	if !SendOtpByTelegram(user.ChatID, tokenString){
+		json.NewEncoder(w).Encode("OTP is not sent by telegram")
+		return
+	}
 	json.NewEncoder(w).Encode(JwtToken{Token: tokenString})
 }
 
@@ -133,7 +132,7 @@ func VerifyPassword(rawPwd, encodedPwd string) bool {
 	salt = encodedPwd[:15]
 	encoded = encodedPwd[16:]
 
-	return EncodePassword(rawPwd, salt) == encoded
+	return sevice.EncodePassword(rawPwd, salt) == encoded
 }
 
 func ProtectedEndpoint(w http.ResponseWriter, req *http.Request) {
@@ -143,100 +142,48 @@ func ProtectedEndpoint(w http.ResponseWriter, req *http.Request) {
 }
 
 func VerifyOtpGetEndpoint(w http.ResponseWriter, req *http.Request) {
-	secret := "7DRUFISBBUCNXPM6"
 	bearerToken, err := GetBearerToken(req.Header.Get("authorization"))
 
 	if err != nil {
 		json.NewEncoder(w).Encode(err)
 		return
 	}
+
 	decodedToken, err := VerifyJwt(bearerToken, jwtSecret)
 	if err != nil {
 		json.NewEncoder(w).Encode(err)
 		return
 	}
-	fmt.Println(decodedToken)
-	otpc := &dgoogauth.OTPConfig{
-		Secret:      secret,
-		WindowSize:  3,
-		HotpCounter: 0,
+
+	//var otpToken OtpToken
+	keys, ok := req.URL.Query()["otp"]
+	if !ok || len(keys[0]) < 1 {
+		log.Println("Url Param 'otp' is missing")
+		return
 	}
-	var otpToken OtpToken
-	_ = json.NewDecoder(req.Body).Decode(&otpToken)
-	fmt.Println(otpToken.Token)
-	decodedToken["authorized"], _ = otpc.Authenticate(otpToken.Token)
 
 	if decodedToken["authorized"] != false {
 		json.NewEncoder(w).Encode("Invalid one-time password!")
 		return
 	}
-	decodedToken["authorized"] = true
-	jwToken, _ := SignJwt(decodedToken, jwtSecret)
-	json.NewEncoder(w).Encode(jwToken)
-}
 
-func VerifyOtpPostEndpoint(w http.ResponseWriter, req *http.Request) {
-	secret := "7DRUFISBBUCNXPM6"
-	bearerToken, err := GetBearerToken(req.Header.Get("authorization"))
-
-	if err != nil {
+	var user model.User
+	if err := DbConnect.Table("users").
+		Select("users.session_key").
+		Where("users.email =  ?", decodedToken["username"]).Find(&user).Error; err != nil {
 		json.NewEncoder(w).Encode(err)
 		return
 	}
-	decodedToken, err := VerifyJwt(bearerToken, jwtSecret)
-	if err != nil {
-		json.NewEncoder(w).Encode(err)
-		return
-	}
-	fmt.Println(decodedToken)
-	otpc := &dgoogauth.OTPConfig{
-		Secret:      secret,
-		WindowSize:  3,
-		HotpCounter: 0,
-	}
-	var otpToken OtpToken
-	_ = json.NewDecoder(req.Body).Decode(&otpToken)
-	fmt.Println(otpToken.Token)
-	decodedToken["authorized"], _ = otpc.Authenticate(otpToken.Token)
 
-	if decodedToken["authorized"] != false {
-		json.NewEncoder(w).Encode("Invalid one-time password!")
+	if user.SessionKey == keys[0] {
+		decodedToken["authorized"] = true
+	} else {
+		json.NewEncoder(w).Encode("Invalid one-time password")
 		return
 	}
-	decodedToken["authorized"] = true
+
 	jwToken, _ := SignJwt(decodedToken, jwtSecret)
 	json.NewEncoder(w).Encode(jwToken)
-}
-
-func GenerateSecretEndpoint(w http.ResponseWriter, req *http.Request) {
-	random := make([]byte, 10)
-	rand.Read(random)
-	secret := base32.StdEncoding.EncodeToString(random)
-	json.NewEncoder(w).Encode(secret)
-}
-
-func confdb() (string) {
-	file, err := os.Open("conf/conf")
-	if err != nil {
-		panic(err)
-	}
-	type dbConf struct {
-		DbHost string
-		DbPort string
-		DbName string
-		DbUser string
-		DbPsw string
-		BotKey string
-		BotSesDuration int64
-	}
-	dbconf := dbConf{}
-	decoder := json.NewDecoder(file)
-	err = decoder.Decode(&dbconf)
-	if err != nil {
-		panic(err)
-	}
-
-	return "host=" + dbconf.DbHost + " port=" + dbconf.DbPort + " user=" + dbconf.DbUser + " dbname=" + dbconf.DbName + " password=" + dbconf.DbPsw
 }
 
 type newUser struct {
@@ -245,14 +192,20 @@ type newUser struct {
 	Email string `json:"email"`
 	Password string `json:"password"`
 	ConfPassword string `json:"confpassword"`
+	ChatID int64 `json:"chatid"`
 }
 
 func SignUpEndpoint(w http.ResponseWriter, req *http.Request) {
 	var u newUser
 	_ = json.NewDecoder(req.Body).Decode(&u)
 
-	salt := GetRandomString(15)
-	encodedPwd := salt + "$" + EncodePassword(u.Password, salt)
+	salt := sevice.GetRandomString(15)
+	encodedPwd := salt + "$" + sevice.EncodePassword(u.Password, salt)
+
+	if !ValidateEmail(u.Email) {
+		json.NewEncoder(w).Encode("Incorrect Email address")
+		return
+	}
 
 	User := model.User{
 		FirstName:	u.FirstName,
@@ -264,6 +217,7 @@ func SignUpEndpoint(w http.ResponseWriter, req *http.Request) {
 		Salt:		salt,
 		CreatedAt:  time.Now(),
 		UpdatedAt:  time.Now(),
+		ChatID:     u.ChatID,
 	}
 
 	DbConnect.Create(&User)
@@ -276,7 +230,8 @@ func SignUpEndpoint(w http.ResponseWriter, req *http.Request) {
 }
 
 func main() {
-	db, err := gorm.Open("postgres", confdb())
+	db, err := gorm.Open("postgres",
+		"host=127.0.0.1 port=54320 user=homestead dbname=stock password=secret")
 	DbConnect = db
 	if err != nil {
 		panic(err)
@@ -288,59 +243,59 @@ func main() {
 	jwtSecret = "JC7qMMZh4G"
 	router.HandleFunc("/signup", SignUpEndpoint).Methods("POST")
 	router.HandleFunc("/authenticate", CreateTokenEndpoint).Methods("POST")
-	router.HandleFunc("/verify-otp", VerifyOtpPostEndpoint).Methods("POST")
 	router.HandleFunc("/verify-otp", VerifyOtpGetEndpoint).Methods("GET")
 	router.HandleFunc("/protected", ValidateMiddleware(ProtectedEndpoint)).Methods("GET")
-	router.HandleFunc("/generate-secret", GenerateSecretEndpoint).Methods("GET")
+	router.HandleFunc("/generate-secret", sevice.GenerateSecretEndpoint).Methods("GET")
 	log.Fatal(http.ListenAndServe(":8080", router))
 }
 
-// Random generate string
-func GetRandomString(n int) string {
-	const alphanum = "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	var bytes = make([]byte, n)
-	rand.Read(bytes)
-	for i, b := range bytes {
-		bytes[i] = alphanum[b%byte(len(alphanum))]
-	}
-	return string(bytes)
+func ValidateEmail(email string) bool {
+	Re := regexp.MustCompile(`^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,4}$`)
+	return Re.MatchString(email)
 }
 
-func EncodePassword(rawPwd string, salt string) string {
-	pwd := PBKDF2([]byte(rawPwd), []byte(salt), 10000, 50, sha256.New)
-	return hex.EncodeToString(pwd)
+func SendOtpByEmail(recipient string, otp string)  bool{
+
+	auth := smtp.PlainAuth(
+		"",
+		"wspdev@gmail.com",//email
+		"Hurka2017",//email pass
+		"smtp.gmail.com",
+	)
+	msg := []byte("To: " +
+		recipient + "\r\n" +
+		"Subject: 2FA\r\n" +
+		"\r\n" +
+		otp + "\r\n")
+	err := smtp.SendMail(
+		"smtp.gmail.com:587",
+		auth,
+		"wspdev@gmail.com",
+		[]string{recipient},
+		msg,
+	)
+	if err != nil {
+		fmt.Println(err)
+		return false
+	}
+
+	return true
 }
 
-func PBKDF2(password, salt []byte, iter, keyLen int, h func() hash.Hash) []byte {
-	prf := hmac.New(h, password)
-	hashLen := prf.Size()
-	numBlocks := (keyLen + hashLen - 1) / hashLen
+func SendOtpByTelegram(chat_id int64, otp string)  bool{
 
-	var buf [4]byte
-	dk := make([]byte, 0, numBlocks*hashLen)
-	U := make([]byte, hashLen)
-	for block := 1; block <= numBlocks; block++ {
-		prf.Reset()
-		prf.Write(salt)
-		buf[0] = byte(block >> 24)
-		buf[1] = byte(block >> 16)
-		buf[2] = byte(block >> 8)
-		buf[3] = byte(block)
-		prf.Write(buf[:4])
-		dk = prf.Sum(dk)
-		T := dk[len(dk)-hashLen:]
-		copy(U, T)
-
-		// U_n = PRF(password, U_(n-1))
-		for n := 2; n <= iter; n++ {
-			prf.Reset()
-			prf.Write(U)
-			U = U[:0]
-			U = prf.Sum(U)
-			for x := range U {
-				T[x] ^= U[x]
-			}
-		}
+	body := strings.NewReader("chat_id=" + string(chat_id) + "&text=" + otp)
+	req, err := http.NewRequest("POST", "https://api.telegram.org/767108852:AAEs5E84kXHeV9Lqttm8sf5_ADhaitxEzU4/sendMessage", body)
+	if err != nil {
+		return false
 	}
-	return dk[:keyLen]
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	return true
 }

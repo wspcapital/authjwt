@@ -16,7 +16,7 @@ type User struct {
 	Active      bool
 	Role        int
 	Salt        string
-	Session_key string
+	SessionKey string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
