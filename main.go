@@ -16,7 +16,7 @@ import (
 	"time"
 	"regexp"
 	"net/smtp"
-	"authjwt/sevice"
+	"authjwt/service"
 )
 
 var DbConnect *gorm.DB
@@ -114,7 +114,7 @@ func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
 		json.NewEncoder(w).Encode(err)
 		return
 	}
-	otp := sevice.GetRandomString(24)
+	otp := service.GetRandomString(24)
 	DbConnect.Model(&user).Update("session_key", otp)
 	if !SendOtpByEmail(u.Email, otp) {
 		json.NewEncoder(w).Encode("OTP is not sent by email")
@@ -132,7 +132,7 @@ func VerifyPassword(rawPwd, encodedPwd string) bool {
 	salt = encodedPwd[:15]
 	encoded = encodedPwd[16:]
 
-	return sevice.EncodePassword(rawPwd, salt) == encoded
+	return service.EncodePassword(rawPwd, salt) == encoded
 }
 
 func ProtectedEndpoint(w http.ResponseWriter, req *http.Request) {
@@ -199,8 +199,8 @@ func SignUpEndpoint(w http.ResponseWriter, req *http.Request) {
 	var u newUser
 	_ = json.NewDecoder(req.Body).Decode(&u)
 
-	salt := sevice.GetRandomString(15)
-	encodedPwd := salt + "$" + sevice.EncodePassword(u.Password, salt)
+	salt := service.GetRandomString(15)
+	encodedPwd := salt + "$" + service.EncodePassword(u.Password, salt)
 
 	if !ValidateEmail(u.Email) {
 		json.NewEncoder(w).Encode("Incorrect Email address")
@@ -245,7 +245,7 @@ func main() {
 	router.HandleFunc("/authenticate", CreateTokenEndpoint).Methods("POST")
 	router.HandleFunc("/verify-otp", VerifyOtpGetEndpoint).Methods("GET")
 	router.HandleFunc("/protected", ValidateMiddleware(ProtectedEndpoint)).Methods("GET")
-	router.HandleFunc("/generate-secret", sevice.GenerateSecretEndpoint).Methods("GET")
+	router.HandleFunc("/generate-secret", service.GenerateSecretEndpoint).Methods("GET")
 	log.Fatal(http.ListenAndServe(":8080", router))
 }
 
@@ -258,8 +258,8 @@ func SendOtpByEmail(recipient string, otp string)  bool{
 
 	auth := smtp.PlainAuth(
 		"",
-		"wspdev@gmail.com",//email
-		"Hurka2017",//email pass
+		"",//email
+		"",//email pass
 		"smtp.gmail.com",
 	)
 	msg := []byte("To: " +
