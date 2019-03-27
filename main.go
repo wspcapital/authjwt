@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
 
-	"github.com/dgrijalva/jwt-go"
 	"github.com/gorilla/context"
 	"github.com/gorilla/mux"
 	"github.com/jinzhu/gorm"
@@ -27,50 +25,46 @@ type JwtToken struct {
 	Token string `json:"token"`
 }
 
-func SignJwt(claims jwt.MapClaims, secret string) (string, error) {
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(secret))
+type signinUser struct {
+	Email string `json:"email"`
+	Password string `json:"password"`
 }
 
-func VerifyJwt(token string, secret string) (map[string]interface{}, error) {
-
-	jwToken, err := jwt.Parse(token, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("There was an error")
-		}
-		return []byte(secret), nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	if !jwToken.Valid {
-		return nil, fmt.Errorf("Invalid authorization token")
-	}
-	return jwToken.Claims.(jwt.MapClaims), nil
-}
-
-func GetBearerToken(header string) (string, error) {
-	if header == "" {
-		return "", fmt.Errorf("An authorization header is required")
-	}
-	token := strings.Split(header, " ")
-	if len(token) != 2 {
-		return "", fmt.Errorf("Malformed bearer token")
-	}
-	return token[1], nil
+type newUser struct {
+	FirstName string `json:"firstname"`
+	LastName string `json:"lastname"`
+	Email string `json:"email"`
+	Password string `json:"password"`
+	ConfPassword string `json:"confpassword"`
+	ChatID int64 `json:"chatid"`
 }
 
 func ValidateMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		bearerToken, err := GetBearerToken(req.Header.Get("authorization"))
+		bearerToken, err := service.GetBearerToken(req.Header.Get("authorization"))
 		if err != nil {
 			json.NewEncoder(w).Encode(err)
 			return
 		}
 
-		decodedToken, err := VerifyJwt(bearerToken, jwtSecret)
+		decodedToken, err := service.VerifyJwt(bearerToken, jwtSecret)
 		if err != nil {
 			json.NewEncoder(w).Encode(err)
+			return
+		}
+
+		var user model.User
+		err = DbConnect.Table("users").
+			Select("users.email, users.passw, users.salt, users.chat_id").
+			Where("users.id =  ? and users.passw = ?", decodedToken["user_id"], decodedToken["password"]).First(&user).Error
+
+		if err != nil && gorm.IsRecordNotFoundError(err) == true {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("JWT is incorrect"))
+			return
+		} else if err != nil {
+			fmt.Println(err)
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
@@ -85,11 +79,6 @@ func ValidateMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			json.NewEncoder(w).Encode("2FA is required")
 		}
 	})
-}
-
-type signinUser struct {
-	Email string `json:"email"`
-	Password string `json:"password"`
 }
 
 func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
@@ -113,17 +102,15 @@ func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
 	authUser := make(map[string]interface{})
 	authUser["expiresIn"] = time.Now().Add(time.Second * 3600).Unix()
 	authUser["user_id"] = user.ID
-	authUser["password"] = u.Password
+	authUser["password"] = user.Passw
 	authUser["otp"] = otp
 	authUser["authorized"] = false
 
-	tokenString, err := SignJwt(authUser, jwtSecret)
+	tokenString, err := service.SignJwt(authUser, jwtSecret)
 	if err != nil {
 		json.NewEncoder(w).Encode(err)
 		return
 	}
-
-	//DbConnect.Model(&user).Update("session_key", otp)
 
 	var sentOtp bool
 	if user.TwoFactorEmail {
@@ -145,16 +132,31 @@ func ProtectedEndpoint(w http.ResponseWriter, req *http.Request) {
 }
 
 func VerifyOtpGetEndpoint(w http.ResponseWriter, req *http.Request) {
-	bearerToken, err := GetBearerToken(req.Header.Get("authorization"))
+	bearerToken, err := service.GetBearerToken(req.Header.Get("authorization"))
 
 	if err != nil {
 		json.NewEncoder(w).Encode(err)
 		return
 	}
 
-	decodedToken, err := VerifyJwt(bearerToken, jwtSecret)
+	decodedToken, err := service.VerifyJwt(bearerToken, jwtSecret)
 	if err != nil {
 		json.NewEncoder(w).Encode(err)
+		return
+	}
+
+	var user model.User
+	err = DbConnect.Table("users").
+		Select("users.email, users.passw, users.salt, users.chat_id").
+		Where("users.id =  ? and users.passw = ?", decodedToken["user_id"], decodedToken["password"]).First(&user).Error
+
+	if err != nil && gorm.IsRecordNotFoundError(err) == true {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("JWT is incorrect"))
+		return
+	} else if err != nil {
+		fmt.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -177,17 +179,8 @@ func VerifyOtpGetEndpoint(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	jwToken, _ := SignJwt(decodedToken, jwtSecret)
+	jwToken, _ := service.SignJwt(decodedToken, jwtSecret)
 	json.NewEncoder(w).Encode(jwToken)
-}
-
-type newUser struct {
-	FirstName string `json:"firstname"`
-	LastName string `json:"lastname"`
-	Email string `json:"email"`
-	Password string `json:"password"`
-	ConfPassword string `json:"confpassword"`
-	ChatID int64 `json:"chatid"`
 }
 
 func SignUpEndpoint(w http.ResponseWriter, req *http.Request) {
