@@ -69,11 +69,15 @@ func ValidateMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		decodedToken, err := VerifyJwt(bearerToken, jwtSecret)
-		fmt.Println(decodedToken)
 		if err != nil {
 			json.NewEncoder(w).Encode(err)
 			return
 		}
+
+		//TODO: Check Expires
+		/*if decodedToken["expiresIn"] < time.Now().Unix() {
+		}*/
+
 		if decodedToken["authorized"] == true {
 			context.Set(req, "decoded", decodedToken)
 			next(w, req)
@@ -93,7 +97,7 @@ func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
 	_ = json.NewDecoder(req.Body).Decode(&u)
 	var user model.User
 	if err := DbConnect.Table("users").
-		Select("users.email, users.passw, users.salt, users.chat_id, users.two_factor_email, users.two_factor_telegram").
+		Select("users.id, users.email, users.passw, users.salt, users.chat_id, users.two_factor_email, users.two_factor_telegram").
 		Where("users.email =  ?", u.Email).Find(&user).Error; err != nil {
 		json.NewEncoder(w).Encode("Indicated Email is absent")
 		return
@@ -104,9 +108,13 @@ func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	otp := service.GetRandomString(24)
+
 	authUser := make(map[string]interface{})
-	authUser["username"] = u.Email
+	authUser["expiresIn"] = time.Now().Add(time.Second * 3600).Unix()
+	authUser["user_id"] = user.ID
 	authUser["password"] = u.Password
+	authUser["otp"] = otp
 	authUser["authorized"] = false
 
 	tokenString, err := SignJwt(authUser, jwtSecret)
@@ -114,8 +122,8 @@ func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
 		json.NewEncoder(w).Encode(err)
 		return
 	}
-	otp := service.GetRandomString(24)
-	DbConnect.Model(&user).Update("session_key", otp)
+
+	//DbConnect.Model(&user).Update("session_key", otp)
 
 	var sentOtp bool
 	if user.TwoFactorEmail {
@@ -162,15 +170,7 @@ func VerifyOtpGetEndpoint(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	var user model.User
-	if err := DbConnect.Table("users").
-		Select("users.session_key").
-		Where("users.email =  ?", decodedToken["username"]).Find(&user).Error; err != nil {
-		json.NewEncoder(w).Encode(err)
-		return
-	}
-
-	if user.SessionKey == keys[0] {
+	if decodedToken["otp"] == keys[0] {
 		decodedToken["authorized"] = true
 	} else {
 		json.NewEncoder(w).Encode("Invalid one-time password")
@@ -195,43 +195,49 @@ func SignUpEndpoint(w http.ResponseWriter, req *http.Request) {
 	_ = json.NewDecoder(req.Body).Decode(&u)
 
 	if !service.ValidateEmail(u.Email) {
-		json.NewEncoder(w).Encode("Incorrect Email address")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Incorrect Email address"))
 		return
 	}
 
 	var user model.User
 	err := DbConnect.Table("users").
-		Select("users.email, users.passw, users.salt, users.chat_id").
-		Where("users.email =  ?", u.Email).First(&user)
+	Select("users.email, users.passw, users.salt, users.chat_id").
+	Where("users.email =  ?", u.Email).First(&user).Error
 
-	if !err.RecordNotFound() {
-		json.NewEncoder(w).Encode("Email " + user.Email + " is used")
+	if gorm.IsRecordNotFoundError(err) == true {
+		salt := service.GetRandomString(15)
+		encodedPwd := salt + "$" + service.EncodePassword(u.Password, salt)
+
+		User := model.User{
+			FirstName:	u.FirstName,
+			LastName:	u.LastName,
+			Alias:		u.FirstName+"_"+u.LastName,
+			Passw:		encodedPwd,
+			Active:		true,
+			Email:      u.Email,
+			Salt:		salt,
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+			ChatID:     u.ChatID,
+		}
+
+		DbConnect.Create(&User)
+
+		if DbConnect.Error != nil {
+			fmt.Println(DbConnect.Error)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(User.ID)
+		return
+	} else if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-
-	salt := service.GetRandomString(15)
-	encodedPwd := salt + "$" + service.EncodePassword(u.Password, salt)
-
-	User := model.User{
-		FirstName:	u.FirstName,
-		LastName:	u.LastName,
-		Alias:		u.FirstName+"_"+u.LastName,
-		Passw:		encodedPwd,
-		Active:		true,
-		Email:      u.Email,
-		Salt:		salt,
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
-		ChatID:     u.ChatID,
-	}
-
-	DbConnect.Create(&User)
-
-	if DbConnect.Error != nil {
-		fmt.Println(DbConnect.Error)
-		json.NewEncoder(w).Encode(nil)
-	}
-	json.NewEncoder(w).Encode(User.ID)
+	w.WriteHeader(http.StatusBadRequest)
+	w.Write([]byte("Email " + user.Email + " is used"))
 }
 
 func main() {

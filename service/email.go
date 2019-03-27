@@ -19,11 +19,11 @@ func SendOtpByEmail(recipient string, otp string)  bool{
 		recipient + "\r\n" +
 		"Subject: 2FA\r\n" +
 		"\r\n" +
-		os.Getenv("BOT_API_KEY") + "/?otp=" + otp + "\r\n")
+		os.Getenv("APP_HOST") + "/verify-otp?otp=" + otp + "\r\n")
 	err := smtp.SendMail(
-		os.Getenv("BOT_API_KEY") + ":" + os.Getenv("EMAIL_PORT"),
+		os.Getenv("EMAIL_ADDR") + ":" + os.Getenv("EMAIL_PORT"),
 		auth,
-		"wspdev@gmail.com",
+		os.Getenv("EMAIL_USER"),
 		[]string{recipient},
 		msg,
 	)
