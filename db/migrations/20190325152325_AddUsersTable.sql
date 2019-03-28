@@ -10,13 +10,13 @@ CREATE TABLE users (
   First_name VARCHAR(64) NOT NULL,
   Last_name VARCHAR(64) NOT NULL,
   Middle_name VARCHAR(64),
-  Active boolean DEFAULT false,
+  Active boolean DEFAULT FALSE,
   Role int DEFAULT 20,
   Salt VARCHAR(32),
   Created_at TIMESTAMP,
   Updated_at TIMESTAMP,
-  Two_factor_email boolean DEFAULT true,
-  Two_factor_telegram boolean DEFAULT false,
+  Two_factor_email boolean DEFAULT TRUE ,
+  Two_factor_telegram boolean DEFAULT FALSE,
   Session_key text
 );
 

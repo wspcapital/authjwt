@@ -213,6 +213,7 @@ func SignUpEndpoint(w http.ResponseWriter, req *http.Request) {
 			CreatedAt:  time.Now(),
 			UpdatedAt:  time.Now(),
 			ChatID:     u.ChatID,
+			TwoFactorEmail: true,
 		}
 
 		DbConnect.Create(&User)
@@ -233,6 +234,91 @@ func SignUpEndpoint(w http.ResponseWriter, req *http.Request) {
 	w.Write([]byte("Email " + user.Email + " is used"))
 }
 
+func SetEmailNoteEndpoint(w http.ResponseWriter, req *http.Request) {
+	decoded := context.Get(req, "decoded")
+
+	var setParam bool
+	vars := mux.Vars(req)
+	if vars["set-param"] == "1" {
+		setParam = true
+	} else if vars["set-param"] == "0" {
+		setParam = false
+	} else {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Set param is incorrect"))
+		return
+	}
+
+	mapJWT, ok := decoded.(map[string]interface{})
+	if ok {
+		var user model.User
+
+		if err := DbConnect.First(&user, int(mapJWT["user_id"].(float64))).Error; err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(err.Error()))
+			return
+		}
+
+		if user.TwoFactorEmail != setParam {
+			user.TwoFactorEmail = setParam
+
+			if err := DbConnect.Save(&user).Error; err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(err.Error()))
+				return
+			}
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode("Email notification is set to " + vars["set-param"] + " for user " + user.Email)
+	} else {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("JWT is incorrect"))
+	}
+	return
+}
+
+func SetTelegramNoteEndpoint(w http.ResponseWriter, req *http.Request) {
+	decoded := context.Get(req, "decoded")
+	var setParam bool
+	vars := mux.Vars(req)
+	if vars["set-param"] == "1" {
+		setParam = true
+	} else if vars["set-param"] == "0" {
+		setParam = false
+	} else {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Set param is incorrect"))
+		return
+	}
+
+	mapJWT, ok := decoded.(map[string]interface{})
+	if ok {
+		var user model.User
+		if err := DbConnect.First(&user, int(mapJWT["user_id"].(float64))).Error; err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(err.Error()))
+			return
+		}
+
+		if user.TwoFactorTelegram != setParam {
+			user.TwoFactorTelegram = setParam
+
+			if err := DbConnect.Save(&user).Error; err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(err.Error()))
+				return
+			}
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode("Telegram notification is set to " + vars["set-param"] + " for user " + user.Email)
+
+	} else {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("JWT is incorrect"))
+	}
+	return
+}
+
 func main() {
 	err := godotenv.Load()
 	db, err := gorm.Open("postgres",
@@ -250,6 +336,8 @@ func main() {
 	router.HandleFunc("/authenticate", CreateTokenEndpoint).Methods("POST")
 	router.HandleFunc("/verify-otp", VerifyOtpGetEndpoint).Methods("GET")
 	router.HandleFunc("/protected", ValidateMiddleware(ProtectedEndpoint)).Methods("GET")
+	router.HandleFunc("/set-email-note/{set-param}", ValidateMiddleware(SetEmailNoteEndpoint)).Methods("GET")
+	router.HandleFunc("/set-telegram-note/{set-param}", ValidateMiddleware(SetTelegramNoteEndpoint)).Methods("GET")
 	router.HandleFunc("/generate-secret", service.GenerateSecretEndpoint).Methods("GET")
 	log.Fatal(http.ListenAndServe(":8080", router))
 }
