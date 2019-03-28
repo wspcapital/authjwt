@@ -19,7 +19,7 @@ func SendOtpByEmail(recipient string, otp string)  bool{
 		recipient + "\r\n" +
 		"Subject: 2FA\r\n" +
 		"\r\n" +
-		os.Getenv("APP_HOST") + "/verify-otp?otp=" + otp + "\r\n")
+		os.Getenv("APP_HOST") + "/verify-otp/" + otp + "\r\n")
 	err := smtp.SendMail(
 		os.Getenv("EMAIL_ADDR") + ":" + os.Getenv("EMAIL_PORT"),
 		auth,

@@ -43,12 +43,14 @@ func ValidateMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		bearerToken, err := service.GetBearerToken(req.Header.Get("authorization"))
 		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(err)
 			return
 		}
 
 		decodedToken, err := service.VerifyJwt(bearerToken, jwtSecret)
 		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(err)
 			return
 		}
@@ -60,22 +62,25 @@ func ValidateMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		if err != nil && gorm.IsRecordNotFoundError(err) == true {
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte("JWT is incorrect"))
+			json.NewEncoder(w).Encode("Access is incorrect")
 			return
 		} else if err != nil {
-			fmt.Println(err)
 			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(err.Error())
 			return
 		}
 
-		//TODO: Check Expires
-		/*if decodedToken["expiresIn"] < time.Now().Unix() {
-		}*/
+		if int64(decodedToken["expiresIn"].(float64)) < time.Now().Unix() {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode("Token is expired")
+			return
+		}
 
 		if decodedToken["authorized"] == true {
 			context.Set(req, "decoded", decodedToken)
 			next(w, req)
 		} else {
+			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode("2FA is required")
 		}
 	})
@@ -88,11 +93,13 @@ func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
 	if err := DbConnect.Table("users").
 		Select("users.id, users.email, users.passw, users.salt, users.chat_id, users.two_factor_email, users.two_factor_telegram").
 		Where("users.email =  ?", u.Email).Find(&user).Error; err != nil {
-		json.NewEncoder(w).Encode("Indicated Email is absent")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(err.Error())
 		return
 	}
 
 	if service.VerifyPassword(u.Password, user.Passw) == false {
+		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode("Wrong password")
 		return
 	}
@@ -108,6 +115,7 @@ func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
 
 	tokenString, err := service.SignJwt(authUser, jwtSecret)
 	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(err)
 		return
 	}
@@ -119,6 +127,7 @@ func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
 		sentOtp = service.SendOtpByTelegram(user.ChatID, tokenString)
 	}
 	if !sentOtp {
+		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode("OTP is not sent")
 		return
 	}
@@ -127,7 +136,6 @@ func CreateTokenEndpoint(w http.ResponseWriter, req *http.Request) {
 
 func ProtectedEndpoint(w http.ResponseWriter, req *http.Request) {
 	decoded := context.Get(req, "decoded")
-
 	json.NewEncoder(w).Encode(decoded)
 }
 
@@ -135,13 +143,15 @@ func VerifyOtpGetEndpoint(w http.ResponseWriter, req *http.Request) {
 	bearerToken, err := service.GetBearerToken(req.Header.Get("authorization"))
 
 	if err != nil {
-		json.NewEncoder(w).Encode(err)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(err.Error())
 		return
 	}
 
 	decodedToken, err := service.VerifyJwt(bearerToken, jwtSecret)
 	if err != nil {
-		json.NewEncoder(w).Encode(err)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(err.Error())
 		return
 	}
 
@@ -152,29 +162,38 @@ func VerifyOtpGetEndpoint(w http.ResponseWriter, req *http.Request) {
 
 	if err != nil && gorm.IsRecordNotFoundError(err) == true {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("JWT is incorrect"))
+		json.NewEncoder(w).Encode("JWT is incorrect")
 		return
 	} else if err != nil {
-		fmt.Println(err)
 		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(err.Error())
+		return
+	}
+
+	vars := mux.Vars(req)
+	if len(vars["otp"]) < 24 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode("Url Param 'otp' is missing")
 		return
 	}
 
 	//var otpToken OtpToken
-	keys, ok := req.URL.Query()["otp"]
+	/*keys, ok := req.URL.Query()["otp"]
 	if !ok || len(keys[0]) < 1 {
 		log.Println("Url Param 'otp' is missing")
 		return
-	}
+	}*/
 
 	if decodedToken["authorized"] != false {
-		json.NewEncoder(w).Encode("Invalid one-time password!")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode("Invalid one-time password")
 		return
 	}
 
-	if decodedToken["otp"] == keys[0] {
+	if decodedToken["otp"] == vars["otp"] {
 		decodedToken["authorized"] = true
 	} else {
+		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode("Invalid one-time password")
 		return
 	}
@@ -189,7 +208,8 @@ func SignUpEndpoint(w http.ResponseWriter, req *http.Request) {
 
 	if !service.ValidateEmail(u.Email) {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("Incorrect Email address"))
+		//w.Write([]byte("Incorrect Email address"))
+		json.NewEncoder(w).Encode("Incorrect Email address")
 		return
 	}
 
@@ -216,18 +236,18 @@ func SignUpEndpoint(w http.ResponseWriter, req *http.Request) {
 			TwoFactorEmail: true,
 		}
 
-		DbConnect.Create(&User)
-
-		if DbConnect.Error != nil {
-			fmt.Println(DbConnect.Error)
+		if err := DbConnect.Create(&User).Error; err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(err.Error())
 			return
 		}
+
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(User.ID)
 		return
 	} else if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusBadRequest)
@@ -245,7 +265,8 @@ func SetEmailNoteEndpoint(w http.ResponseWriter, req *http.Request) {
 		setParam = false
 	} else {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("Set param is incorrect"))
+		//w.Write([]byte("Set param is incorrect"))
+		json.NewEncoder(w).Encode("Set param is incorrect")
 		return
 	}
 
@@ -255,7 +276,8 @@ func SetEmailNoteEndpoint(w http.ResponseWriter, req *http.Request) {
 
 		if err := DbConnect.First(&user, int(mapJWT["user_id"].(float64))).Error; err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(err.Error()))
+			//w.Write([]byte(err.Error()))
+			json.NewEncoder(w).Encode(err.Error())
 			return
 		}
 
@@ -264,7 +286,8 @@ func SetEmailNoteEndpoint(w http.ResponseWriter, req *http.Request) {
 
 			if err := DbConnect.Save(&user).Error; err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(err.Error()))
+				//w.Write([]byte(err.Error()))
+				json.NewEncoder(w).Encode(err.Error())
 				return
 			}
 		}
@@ -272,7 +295,8 @@ func SetEmailNoteEndpoint(w http.ResponseWriter, req *http.Request) {
 		json.NewEncoder(w).Encode("Email notification is set to " + vars["set-param"] + " for user " + user.Email)
 	} else {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("JWT is incorrect"))
+		//w.Write([]byte("JWT is incorrect"))
+		json.NewEncoder(w).Encode("JWT is incorrect")
 	}
 	return
 }
@@ -287,7 +311,7 @@ func SetTelegramNoteEndpoint(w http.ResponseWriter, req *http.Request) {
 		setParam = false
 	} else {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("Set param is incorrect"))
+		json.NewEncoder(w).Encode("Set param is incorrect")
 		return
 	}
 
@@ -296,7 +320,7 @@ func SetTelegramNoteEndpoint(w http.ResponseWriter, req *http.Request) {
 		var user model.User
 		if err := DbConnect.First(&user, int(mapJWT["user_id"].(float64))).Error; err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(err.Error()))
+			json.NewEncoder(w).Encode(err.Error())
 			return
 		}
 
@@ -305,7 +329,7 @@ func SetTelegramNoteEndpoint(w http.ResponseWriter, req *http.Request) {
 
 			if err := DbConnect.Save(&user).Error; err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(err.Error()))
+				json.NewEncoder(w).Encode(err.Error())
 				return
 			}
 		}
@@ -314,7 +338,7 @@ func SetTelegramNoteEndpoint(w http.ResponseWriter, req *http.Request) {
 
 	} else {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("JWT is incorrect"))
+		json.NewEncoder(w).Encode("JWT is incorrect")
 	}
 	return
 }
@@ -334,7 +358,7 @@ func main() {
 	jwtSecret = os.Getenv("APP_JWT_SECRET")
 	router.HandleFunc("/signup", SignUpEndpoint).Methods("POST")
 	router.HandleFunc("/authenticate", CreateTokenEndpoint).Methods("POST")
-	router.HandleFunc("/verify-otp", VerifyOtpGetEndpoint).Methods("GET")
+	router.HandleFunc("/verify-otp/{otp}", VerifyOtpGetEndpoint).Methods("GET")
 	router.HandleFunc("/protected", ValidateMiddleware(ProtectedEndpoint)).Methods("GET")
 	router.HandleFunc("/set-email-note/{set-param}", ValidateMiddleware(SetEmailNoteEndpoint)).Methods("GET")
 	router.HandleFunc("/set-telegram-note/{set-param}", ValidateMiddleware(SetTelegramNoteEndpoint)).Methods("GET")

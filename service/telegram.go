@@ -7,7 +7,7 @@ import (
 )
 
 func SendOtpByTelegram(chat_id int64, otp string)  bool{
-	body := strings.NewReader("chat_id=" + string(chat_id) + "&text=" + os.Getenv("BOT_API_KEY") + "/?otp=" + otp)
+	body := strings.NewReader("chat_id=" + string(chat_id) + "&text=" + os.Getenv("BOT_API_KEY") + "/" + otp)
 	req, err := http.NewRequest("POST", "https://api.telegram.org/bot" + os.Getenv("BOT_API_KEY") + "/sendMessage", body)
 	if err != nil {
 		return false
