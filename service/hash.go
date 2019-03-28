@@ -3,12 +3,11 @@ package service
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"hash"
-	"crypto/hmac"
 	"net/http"
 	"encoding/base32"
 	"encoding/json"
 	"crypto/rand"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 func GenerateSecretEndpoint(w http.ResponseWriter, req *http.Request) {
@@ -30,11 +29,11 @@ func GetRandomString(n int) string {
 }
 
 func EncodePassword(rawPwd string, salt string) string {
-	pwd := PBKDF2([]byte(rawPwd), []byte(salt), 10000, 50, sha256.New)
+	pwd := pbkdf2.Key([]byte(rawPwd), []byte(salt), 10000, 50, sha256.New)
 	return hex.EncodeToString(pwd)
 }
 
-func PBKDF2(password, salt []byte, iter, keyLen int, h func() hash.Hash) []byte {
+/*func PBKDF2(password, salt []byte, iter, keyLen int, h func() hash.Hash) []byte {
 	prf := hmac.New(h, password)
 	hashLen := prf.Size()
 	numBlocks := (keyLen + hashLen - 1) / hashLen
@@ -66,7 +65,7 @@ func PBKDF2(password, salt []byte, iter, keyLen int, h func() hash.Hash) []byte 
 		}
 	}
 	return dk[:keyLen]
-}
+}*/
 
 func VerifyPassword(rawPwd, encodedPwd string) bool {
 	var salt, encoded string
